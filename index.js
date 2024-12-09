@@ -3,6 +3,8 @@ import fastifyEnv from "@fastify/env";
 import cors from "@fastify/cors";
 import fastifyJwt from "@fastify/jwt";
 import fastifyRedis from "@fastify/redis";
+import { Server } from "socket.io";
+import { createAdapter } from "@socket.io/redis-adapter";
 import { CronJob, CronTime } from "cron";
 import { DateTime } from "luxon";
 
@@ -58,18 +60,41 @@ await fastify.register(fastifyRedis, {
   family: 4,
 });
 
-fastify.addHook("onRequest", async (request, reply) => {
-  try {
-    await request.jwtVerify();
-    console.log(await request.jwtDecode());
-  } catch (err) {
-    reply.send(err);
-  }
-});
+// fastify.addHook("onRequest", async (request, reply) => {
+//   try {
+//     await request.jwtVerify();
+//     console.log(await request.jwtDecode());
+//   } catch (err) {
+//     reply.send(err);
+//   }
+// });
 
 fastify.get("/scheduling/liveness", (request, reply) => {
   reply.send({ status: "ok", message: "The server is alive." });
 });
+
+// fastify.post("/scheduling/queue", (request, reply) => {
+
+// });
+
+const pubClient = fastify.redis.duplicate();
+const subClient = fastify.redis.duplicate();
+
+const io = new Server(fastify.server, {
+  cors: {
+    origin: "*",
+    methods: "*",
+    credentials: true,
+  },
+  transports: ["websocket"],
+  adapter: createAdapter(pubClient, subClient),
+});
+
+// 실시간 서버 시간 브로드캐스트
+setInterval(() => {
+  const serverTime = new Date().toISOString();
+  io.emit("serverTime", serverTime);
+}, 1000); // 1초마다 서버 시간 전송
 
 const startServer = async () => {
   try {
