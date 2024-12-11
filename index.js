@@ -3,6 +3,7 @@ import fastifyEnv from "@fastify/env";
 import cors from "@fastify/cors";
 import fastifyJwt from "@fastify/jwt";
 import fastifyRedis from "@fastify/redis";
+import fastifyPostgres from "@fastify/postgres";
 import { Server } from "socket.io";
 import { createAdapter } from "@socket.io/redis-adapter";
 import { CronJob, CronTime } from "cron";
@@ -19,7 +20,7 @@ import { DateTime } from "luxon";
 
 const schema = {
   type: "object",
-  required: ["PORT", "JWT_SECRET", "CACHE_HOST", "CACHE_PORT"],
+  required: ["PORT", "JWT_SECRET", "CACHE_HOST", "CACHE_PORT", "DB_URL"],
   properties: {
     PORT: {
       type: "integer",
@@ -33,8 +34,13 @@ const schema = {
     CACHE_PORT: {
       type: "integer",
     },
+    DB_URL: {
+      type: "string",
+    },
   },
 };
+
+const jobs = new Set();
 
 const fastify = Fastify({
   trustProxy: true,
@@ -60,6 +66,10 @@ await fastify.register(fastifyRedis, {
   family: 4,
 });
 
+await fastify.register(fastifyPostgres, {
+  connectionString: fastify.config.DB_URL,
+});
+
 // fastify.addHook("onRequest", async (request, reply) => {
 //   try {
 //     await request.jwtVerify();
@@ -69,13 +79,98 @@ await fastify.register(fastifyRedis, {
 //   }
 // });
 
+async function getReservations(eventId, eventDateId) {
+  const query = `
+    SELECT
+      seat.id AS seat_id,
+      seat."areaId" AS area_id,
+      reservation.id AS reservation_id
+    FROM seat
+    INNER JOIN area ON area.id = seat."areaId" AND area."deletedAt" IS NULL
+    LEFT JOIN reservation ON reservation."seatId" = seat.id AND reservation."deletedAt" IS NULL
+    WHERE area."eventId" = $1 AND (reservation."eventDateId" = $2 OR reservation."eventDateId" IS NULL);
+  `;
+  const params = [eventId, eventDateId];
+
+  const { rows } = await fastify.pg.query(query, params);
+
+  return rows;
+}
+
 fastify.get("/scheduling/liveness", (request, reply) => {
   reply.send({ status: "ok", message: "The server is alive." });
 });
 
-// fastify.post("/scheduling/queue", (request, reply) => {
+fastify.post("/scheduling/reservation/status", async (request, reply) => {
+  try {
+    await request.jwtVerify();
+    const decodedToken = await request.jwtDecode();
+    const { sub, eventId, eventDateId } = decodedToken;
 
-// });
+    if (sub !== "scheduling-reservation-status") {
+      return reply.status(403).send({
+        status: "error",
+        message: "Invalid token subject. Unauthorized request.",
+      });
+    }
+
+    if (!eventId || !eventDateId) {
+      return reply.status(400).send({
+        status: "error",
+        message: "Missing required token payload: eventId or eventDateId.",
+      });
+    }
+
+    const queueName = `queue:${eventId}_${eventDateId}`;
+
+    if (!jobs.has(queueName)) {
+      jobs.add(queueName);
+      CronJob.from({
+        cronTime: DateTime.now().plus({ seconds: 1 }).toJSDate(),
+        onTick: async function () {
+          console.log(`Task executed at: ${DateTime.now().toISO()}`);
+
+          const seatsInfo = await getReservations(eventId, eventDateId);
+
+          io.to(queueName).emit("seatsInfo", { seatsInfo });
+
+          if ((await fastify.redis.llen(queueName)) === 0) {
+            this.stop();
+          } else {
+            // 다음 실행 시간을 5초 후로 설정
+            const nextExecution = DateTime.now().plus({ seconds: 5 });
+            this.setTime(new CronTime(nextExecution.toJSDate()));
+            this.start(); // 변경 후 작업 재시작 필요
+          }
+        },
+        onComplete: function () {
+          console.log(`Cron job has been stopped: ${queueName}`);
+          jobs.delete(queueName);
+        },
+        start: true,
+        timeZone: "Asia/Seoul",
+      });
+
+      return reply.status(201).send({
+        status: "success",
+        message: "Cron job created successfully.",
+        data: { queueName },
+      });
+    } else {
+      return reply.status(409).send({
+        status: "fail",
+        message: "A cron job is already running for the provided event.",
+      });
+    }
+  } catch (err) {
+    console.error(err);
+    return reply.status(500).send({
+      status: "error",
+      message: "Internal Server Error",
+      error: err.message,
+    });
+  }
+});
 
 const pubClient = fastify.redis.duplicate();
 const subClient = fastify.redis.duplicate();
