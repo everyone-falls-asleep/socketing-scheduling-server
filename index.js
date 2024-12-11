@@ -79,6 +79,16 @@ await fastify.register(fastifyPostgres, {
 //   }
 // });
 
+function decorrelatedJitter(baseDelay, maxDelay, previousDelay) {
+  if (!previousDelay) {
+    previousDelay = baseDelay;
+  }
+  return Math.min(
+    maxDelay,
+    Math.random() * (previousDelay * 3 - baseDelay) + baseDelay
+  );
+}
+
 async function getReservations(eventId, eventDateId) {
   const query = `
     SELECT
@@ -98,8 +108,22 @@ async function getReservations(eventId, eventDateId) {
 }
 
 async function getRoomUserCount(roomName) {
-  const sockets = await io.in(roomName).fetchSockets();
-  return sockets.length;
+  const maxRetries = 30;
+  let delay = null;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const sockets = await io.in(roomName).fetchSockets();
+      return sockets.length;
+    } catch (err) {
+      console.error(
+        `Timeout reached, retrying (attempt ${attempt}/${maxRetries})...`
+      );
+      await new Promise((resolve) => {
+        delay = decorrelatedJitter(100, 60000, delay);
+        setTimeout(resolve, delay);
+      });
+    }
+  }
 }
 
 fastify.get("/scheduling/liveness", (request, reply) => {
