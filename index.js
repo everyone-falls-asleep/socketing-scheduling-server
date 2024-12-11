@@ -97,6 +97,11 @@ async function getReservations(eventId, eventDateId) {
   return rows;
 }
 
+async function getRoomUserCount(roomName) {
+  const sockets = await io.in(roomName).fetchSockets();
+  return sockets.length;
+}
+
 fastify.get("/scheduling/liveness", (request, reply) => {
   reply.send({ status: "ok", message: "The server is alive." });
 });
@@ -130,13 +135,14 @@ fastify.post("/scheduling/reservation/status", async (request, reply) => {
         onTick: async function () {
           console.log(`Task executed at: ${DateTime.now().toISO()}`);
 
-          const seatsInfo = await getReservations(eventId, eventDateId);
+          const queueSize = await getRoomUserCount(queueName);
 
-          io.to(queueName).emit("seatsInfo", { seatsInfo });
-
-          if ((await fastify.redis.llen(queueName)) === 0) {
+          if (queueSize === 0) {
             this.stop();
           } else {
+            const seatsInfo = await getReservations(eventId, eventDateId);
+            io.to(queueName).emit("seatsInfo", { seatsInfo });
+
             // 다음 실행 시간을 5초 후로 설정
             const nextExecution = DateTime.now().plus({ seconds: 5 });
             this.setTime(new CronTime(nextExecution.toJSDate()));
