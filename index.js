@@ -133,8 +133,6 @@ fastify.post("/scheduling/reservation/status", async (request, reply) => {
       CronJob.from({
         cronTime: DateTime.now().plus({ seconds: 1 }).toJSDate(),
         onTick: async function () {
-          console.log(`Task executed at: ${DateTime.now().toISO()}`);
-
           try {
             const queueSize = await getRoomUserCount(queueName);
 
@@ -148,6 +146,8 @@ fastify.post("/scheduling/reservation/status", async (request, reply) => {
               const nextExecution = DateTime.now().plus({ seconds: 5 });
               this.setTime(new CronTime(nextExecution.toJSDate()));
               this.start(); // 변경 후 작업 재시작 필요
+
+              console.log(`Task executed at: ${DateTime.now().toISO()}`);
             }
           } catch (err) {
             console.error(err);
