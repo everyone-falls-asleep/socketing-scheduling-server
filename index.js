@@ -135,18 +135,23 @@ fastify.post("/scheduling/reservation/status", async (request, reply) => {
         onTick: async function () {
           console.log(`Task executed at: ${DateTime.now().toISO()}`);
 
-          const queueSize = await getRoomUserCount(queueName);
+          try {
+            const queueSize = await getRoomUserCount(queueName);
 
-          if (queueSize === 0) {
+            if (queueSize === 0) {
+              this.stop();
+            } else {
+              const seatsInfo = await getReservations(eventId, eventDateId);
+              io.to(queueName).emit("seatsInfo", { seatsInfo });
+
+              // 다음 실행 시간을 5초 후로 설정
+              const nextExecution = DateTime.now().plus({ seconds: 5 });
+              this.setTime(new CronTime(nextExecution.toJSDate()));
+              this.start(); // 변경 후 작업 재시작 필요
+            }
+          } catch (err) {
+            console.error(err);
             this.stop();
-          } else {
-            const seatsInfo = await getReservations(eventId, eventDateId);
-            io.to(queueName).emit("seatsInfo", { seatsInfo });
-
-            // 다음 실행 시간을 5초 후로 설정
-            const nextExecution = DateTime.now().plus({ seconds: 5 });
-            this.setTime(new CronTime(nextExecution.toJSDate()));
-            this.start(); // 변경 후 작업 재시작 필요
           }
         },
         onComplete: function () {
