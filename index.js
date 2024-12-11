@@ -92,13 +92,11 @@ function decorrelatedJitter(baseDelay, maxDelay, previousDelay) {
 async function getReservations(eventId, eventDateId) {
   const query = `
     SELECT
-      seat.id AS seat_id,
-      seat."areaId" AS area_id,
-      reservation.id AS reservation_id
+      seat.id AS seat_id
     FROM seat
     INNER JOIN area ON area.id = seat."areaId" AND area."deletedAt" IS NULL
     LEFT JOIN reservation ON reservation."seatId" = seat.id AND reservation."deletedAt" IS NULL
-    WHERE area."eventId" = $1 AND (reservation."eventDateId" = $2 OR reservation."eventDateId" IS NULL);
+    WHERE area."eventId" = $1 AND reservation."eventDateId" = $2;
   `;
   const params = [eventId, eventDateId];
 
