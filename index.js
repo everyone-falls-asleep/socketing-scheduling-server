@@ -110,7 +110,7 @@ async function getRoomUserCount(roomName) {
   let delay = null;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const res = await fastify.redis.get(`room:${roomName}:count`);
+      const res = await fastify.redis.get(`queue:${roomName}`);
       return res || 0;
     } catch (err) {
       console.error(
@@ -121,6 +121,15 @@ async function getRoomUserCount(roomName) {
         setTimeout(resolve, delay);
       });
     }
+  }
+}
+
+async function getQueueLength(queueName) {
+  try {
+    return await fastify.redis.llen(queueName);
+  } catch (err) {
+    console.error("Redis error:", err);
+    return -1;
   }
 }
 
@@ -156,7 +165,7 @@ fastify.post("/scheduling/reservation/status", async (request, reply) => {
         cronTime: DateTime.now().plus({ seconds: 1 }).toJSDate(),
         onTick: async function () {
           try {
-            const queueSize = await getRoomUserCount(queueName);
+            const queueSize = await getQueueLength(queueName);
 
             if (queueSize === 0) {
               this.stop();
