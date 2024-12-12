@@ -106,16 +106,6 @@ async function getReservations(eventId, eventDateId) {
   return rows;
 }
 
-function decorrelatedJitter(baseDelay, maxDelay, previousDelay) {
-  if (!previousDelay) {
-    previousDelay = baseDelay;
-  }
-  return Math.min(
-    maxDelay,
-    Math.random() * (previousDelay * 3 - baseDelay) + baseDelay
-  );
-}
-
 async function getAllAreasFromRedis(roomName) {
   const areasData = await fastify.redis.hgetall(`areas:${roomName}`);
   const areas = [];
