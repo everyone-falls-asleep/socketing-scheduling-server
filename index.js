@@ -247,7 +247,7 @@ fastify.post("/scheduling/reservation/status", async (request, reply) => {
       let isStopped = false;
 
       CronJob.from({
-        cronTime: DateTime.now().plus({ seconds: 1 }).toJSDate(),
+        cronTime: DateTime.now().plus({ seconds: 5 }).toJSDate(),
         onTick: async function () {
           try {
             const queueSize = await getQueueLength(queueName);
@@ -267,7 +267,9 @@ fastify.post("/scheduling/reservation/status", async (request, reply) => {
               this.setTime(new CronTime(nextExecution.toJSDate()));
               this.start(); // 변경 후 작업 재시작 필요
 
-              console.log(`Task executed at: ${DateTime.now().toISO()}`);
+              console.log(
+                `Task(reservation:status) executed at: ${DateTime.now().toISO()}`
+              );
             }
           } catch (err) {
             console.error(err);
@@ -282,6 +284,7 @@ fastify.post("/scheduling/reservation/status", async (request, reply) => {
           }
         },
         start: true,
+        runOnInit: true,
         timeZone: "Asia/Seoul",
       });
 
@@ -354,7 +357,9 @@ fastify.post("/scheduling/queue/status", async (request, reply) => {
               this.setTime(new CronTime(nextExecution.toJSDate()));
               this.start(); // 변경 후 작업 재시작 필요
 
-              console.log(`Task executed at: ${DateTime.now().toISO()}`);
+              console.log(
+                `Task(queue:status) executed at: ${DateTime.now().toISO()}`
+              );
             }
           } catch (err) {
             console.error(err);
@@ -369,6 +374,7 @@ fastify.post("/scheduling/queue/status", async (request, reply) => {
           }
         },
         start: true,
+        runOnInit: true,
         timeZone: "Asia/Seoul",
       });
 
