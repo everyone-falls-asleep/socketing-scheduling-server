@@ -8,6 +8,7 @@ import { Server } from "socket.io";
 import { createAdapter } from "@socket.io/redis-adapter";
 import { CronJob, CronTime } from "cron";
 import { DateTime } from "luxon";
+import crypto from "node:crypto";
 
 // field          allowed values
 // -----          --------------
@@ -137,6 +138,42 @@ fastify.get("/scheduling/liveness", (request, reply) => {
   reply.send({ status: "ok", message: "The server is alive." });
 });
 
+// fastify.post("/scheduling/token", async (request, reply) => {
+//   const { eventId, eventDateId } = request.body;
+
+//   if (!eventId || !eventDateId) {
+//     return reply.status(400).send({
+//       status: "error",
+//       message: "Missing required token payload: eventId or eventDateId.",
+//     });
+//   }
+
+//   try {
+//     const token = fastify.jwt.sign(
+//       {
+//         jti: crypto.randomUUID(),
+//         sub: "scheduling-reservation-status",
+//         eventId,
+//         eventDateId,
+//       },
+//       {
+//         expiresIn: 600,
+//       }
+//     );
+
+//     return reply.status(403).send({
+//       token,
+//     });
+//   } catch (err) {
+//     console.error(err);
+//     return reply.status(500).send({
+//       status: "error",
+//       message: "Internal Server Error",
+//       error: err.message,
+//     });
+//   }
+// });
+
 fastify.post("/scheduling/reservation/status", async (request, reply) => {
   try {
     await request.jwtVerify();
@@ -161,6 +198,9 @@ fastify.post("/scheduling/reservation/status", async (request, reply) => {
 
     if (!jobs.has(queueName)) {
       jobs.add(queueName);
+
+      let isStopped = false;
+
       CronJob.from({
         cronTime: DateTime.now().plus({ seconds: 1 }).toJSDate(),
         onTick: async function () {
@@ -171,6 +211,7 @@ fastify.post("/scheduling/reservation/status", async (request, reply) => {
               console.log(
                 `Queue is empty. Stopping the cron job for queue: ${queueName}`
               );
+              isStopped = true; // 플래그 설정
               this.stop();
             } else {
               const seatsInfo = await getReservations(eventId, eventDateId);
@@ -185,12 +226,15 @@ fastify.post("/scheduling/reservation/status", async (request, reply) => {
             }
           } catch (err) {
             console.error(err);
+            isStopped = true; // 에러 발생 시에도 작업 중지
             this.stop();
           }
         },
         onComplete: function () {
-          console.log(`Cron job has been stopped: ${queueName}`);
-          jobs.delete(queueName);
+          if (isStopped) {
+            console.log(`Cron job has been stopped: ${queueName}`);
+            jobs.delete(queueName);
+          }
         },
         start: true,
         timeZone: "Asia/Seoul",
