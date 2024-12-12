@@ -168,6 +168,9 @@ fastify.post("/scheduling/reservation/status", async (request, reply) => {
             const queueSize = await getQueueLength(queueName);
 
             if (queueSize === 0) {
+              console.log(
+                `Queue is empty. Stopping the cron job for queue: ${queueName}`
+              );
               this.stop();
             } else {
               const seatsInfo = await getReservations(eventId, eventDateId);
