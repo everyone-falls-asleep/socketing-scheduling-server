@@ -134,6 +134,50 @@ async function getQueueLength(queueName) {
   }
 }
 
+async function getQueue(queueName) {
+  const rawQueue = await fastify.redis.lrange(queueName, 0, -1);
+  return rawQueue
+    .map((item) => {
+      try {
+        return JSON.parse(item);
+      } catch (err) {
+        console.error(`Failed to parse item in queue "${queueName}":`, err);
+        return null; // 파싱 실패 시 null로 반환 (필요에 따라 처리 방식 변경 가능)
+      }
+    })
+    .filter((item) => item !== null); // null 값 제거
+}
+
+async function getSocketsInRoom(queueName) {
+  const maxRetries = 30;
+  let delay = null;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await io.in(queueName).fetchSockets();
+    } catch (err) {
+      console.error(
+        `Timeout reached, retrying (attempt ${attempt}/${maxRetries})...`
+      );
+      await new Promise((resolve) => {
+        delay = decorrelatedJitter(100, 60000, delay);
+        setTimeout(resolve, delay);
+      });
+    }
+  }
+}
+
+async function broadcastQueueUpdate(queueName) {
+  const queue = await getQueue(queueName);
+  const socketsInRoom = await getSocketsInRoom(queueName);
+  socketsInRoom.forEach((socket) => {
+    const position = queue.findIndex((item) => item.socketId === socket.id) + 1;
+    socket.emit("updateQueue", {
+      yourPosition: position,
+      totalWaiting: queue.length,
+    });
+  });
+}
+
 fastify.get("/scheduling/liveness", (request, reply) => {
   reply.send({ status: "ok", message: "The server is alive." });
 });
@@ -180,7 +224,7 @@ fastify.post("/scheduling/reservation/status", async (request, reply) => {
     const decodedToken = await request.jwtDecode();
     const { sub, eventId, eventDateId } = decodedToken;
 
-    if (sub !== "scheduling-reservation-status") {
+    if (sub !== "scheduling") {
       return reply.status(403).send({
         status: "error",
         message: "Invalid token subject. Unauthorized request.",
@@ -195,9 +239,10 @@ fastify.post("/scheduling/reservation/status", async (request, reply) => {
     }
 
     const queueName = `queue:${eventId}_${eventDateId}`;
+    const jobName = `reservation:status:${queueName}`;
 
-    if (!jobs.has(queueName)) {
-      jobs.add(queueName);
+    if (!jobs.has(jobName)) {
+      jobs.add(jobName);
 
       let isStopped = false;
 
@@ -232,8 +277,8 @@ fastify.post("/scheduling/reservation/status", async (request, reply) => {
         },
         onComplete: function () {
           if (isStopped) {
-            console.log(`Cron job has been stopped: ${queueName}`);
-            jobs.delete(queueName);
+            console.log(`Cron job has been stopped: ${jobName}`);
+            jobs.delete(jobName);
           }
         },
         start: true,
@@ -243,7 +288,94 @@ fastify.post("/scheduling/reservation/status", async (request, reply) => {
       return reply.status(201).send({
         status: "success",
         message: "Cron job created successfully.",
-        data: { queueName },
+        data: { jobName },
+      });
+    } else {
+      return reply.status(409).send({
+        status: "fail",
+        message: "A cron job is already running for the provided event.",
+      });
+    }
+  } catch (err) {
+    console.error(err);
+    return reply.status(500).send({
+      status: "error",
+      message: "Internal Server Error",
+      error: err.message,
+    });
+  }
+});
+
+fastify.post("/scheduling/queue/status", async (request, reply) => {
+  try {
+    await request.jwtVerify();
+    const decodedToken = await request.jwtDecode();
+    const { sub, eventId, eventDateId } = decodedToken;
+
+    if (sub !== "scheduling") {
+      return reply.status(403).send({
+        status: "error",
+        message: "Invalid token subject. Unauthorized request.",
+      });
+    }
+
+    if (!eventId || !eventDateId) {
+      return reply.status(400).send({
+        status: "error",
+        message: "Missing required token payload: eventId or eventDateId.",
+      });
+    }
+
+    const queueName = `queue:${eventId}_${eventDateId}`;
+    const jobName = `queue:status:${queueName}`;
+
+    if (!jobs.has(jobName)) {
+      jobs.add(jobName);
+
+      let isStopped = false;
+
+      CronJob.from({
+        cronTime: DateTime.now().plus({ seconds: 1 }).toJSDate(),
+        onTick: async function () {
+          try {
+            const queueSize = await getQueueLength(queueName);
+
+            if (queueSize === 0) {
+              console.log(
+                `Queue is empty. Stopping the cron job for queue: ${queueName}`
+              );
+              isStopped = true; // 플래그 설정
+              this.stop();
+            } else {
+              await broadcastQueueUpdate(queueName);
+
+              // 다음 실행 시간을 1초 후로 설정
+              const nextExecution = DateTime.now().plus({ seconds: 1 });
+              this.setTime(new CronTime(nextExecution.toJSDate()));
+              this.start(); // 변경 후 작업 재시작 필요
+
+              console.log(`Task executed at: ${DateTime.now().toISO()}`);
+            }
+          } catch (err) {
+            console.error(err);
+            isStopped = true; // 에러 발생 시에도 작업 중지
+            this.stop();
+          }
+        },
+        onComplete: function () {
+          if (isStopped) {
+            console.log(`Cron job has been stopped: ${jobName}`);
+            jobs.delete(jobName);
+          }
+        },
+        start: true,
+        timeZone: "Asia/Seoul",
+      });
+
+      return reply.status(201).send({
+        status: "success",
+        message: "Cron job created successfully.",
+        data: { jobName },
       });
     } else {
       return reply.status(409).send({
