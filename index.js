@@ -106,13 +106,163 @@ async function getReservations(eventId, eventDateId) {
   return rows;
 }
 
+function decorrelatedJitter(baseDelay, maxDelay, previousDelay) {
+  if (!previousDelay) {
+    previousDelay = baseDelay;
+  }
+  return Math.min(
+    maxDelay,
+    Math.random() * (previousDelay * 3 - baseDelay) + baseDelay
+  );
+}
+
+async function getAllAreasFromRedis(roomName) {
+  const areasData = await fastify.redis.hgetall(`areas:${roomName}`);
+  const areas = [];
+  for (const areaId in areasData) {
+    areas.push(JSON.parse(areasData[areaId]));
+  }
+  return areas;
+}
+
+async function getAreasForRoom(eventId) {
+  // PostgreSQL 쿼리 실행
+  const query = `
+    SELECT
+      area.id,
+      area.label,
+      area.svg,
+      area.price
+    FROM area
+    WHERE area."eventId" = $1
+      AND area."deletedAt" IS NULL;
+  `;
+  const params = [eventId];
+
+  const { rows } = await fastify.pg.query(query, params);
+
+  // 구역 정보를 반환
+  return rows;
+}
+
+async function updateAreaInRedis(roomName, areaId, area) {
+  await fastify.redis.hset(`areas:${roomName}`, areaId, JSON.stringify(area));
+}
+
+async function getAllSeatsFromRedis(areaName) {
+  const seatsData = await fastify.redis.hgetall(`seats:${areaName}`);
+  const seats = [];
+  for (const seatId in seatsData) {
+    seats.push(JSON.parse(seatsData[seatId]));
+  }
+  return seats;
+}
+
+async function getSeatsForArea(eventDateId, areaId) {
+  // PostgreSQL 쿼리 실행
+  const query = `
+    SELECT
+      seat.id AS seat_id,
+      seat.cx,
+      seat.cy,
+      seat.row,
+      seat.number,
+      seat."areaId" AS area_id,
+      reservation.id AS reservation_id,
+      eventDate.id AS event_date_id,
+      eventDate.date,
+      "order"."userId" AS reserved_user_id
+    FROM seat
+    LEFT JOIN reservation ON reservation."seatId" = seat.id AND reservation."canceledAt" IS NULL AND reservation."deletedAt" IS NULL
+    LEFT JOIN event_date AS eventDate ON reservation."eventDateId" = eventDate.id
+    LEFT JOIN "order" ON reservation."orderId" = "order".id AND "order"."canceledAt" IS NULL AND "order"."deletedAt" IS NULL
+    WHERE seat."areaId" = $1
+      AND (eventDate.id = $2 OR eventDate.id IS NULL);
+  `;
+  const params = [areaId, eventDateId];
+
+  const { rows } = await fastify.pg.query(query, params);
+
+  // 데이터 가공
+  const seatMap = new Map();
+
+  rows.forEach((row) => {
+    if (!seatMap.has(row.seat_id)) {
+      seatMap.set(row.seat_id, {
+        id: row.seat_id,
+        cx: row.cx,
+        cy: row.cy,
+        row: row.row,
+        number: row.number,
+        area_id: row.area_id,
+        selectedBy: null,
+        reservedUserId: row.reserved_user_id || null, // 예약된 유저 ID
+        updatedAt: null, // 초기 상태
+        expirationTime: null, // 초기 상태
+      });
+    }
+  });
+
+  return Array.from(seatMap.values());
+}
+
+async function updateSeatInRedis(areaName, seatId, seat) {
+  await fastify.redis.hset(`seats:${areaName}`, seatId, JSON.stringify(seat));
+}
+
+async function startReservationStatusInterval(eventId, eventDateId) {
+  const roomName = `${eventId}_${eventDateId}`;
+  // 만약 해당 room에 대한 타이머가 없다면 생성
+  try {
+    // areas 및 areaStats 계산 로직
+    let areas = await getAllAreasFromRedis(roomName);
+    if (areas.length === 0) {
+      areas = await getAreasForRoom(eventId);
+      for (const area of areas) {
+        await updateAreaInRedis(roomName, area.id, area);
+      }
+    }
+
+    const areaStats = [];
+    for (const area of areas) {
+      const areaId = area.id;
+      const areaName = `${eventId}_${eventDateId}_${areaId}`;
+      let seats = await getAllSeatsFromRedis(areaName);
+      if (seats.length === 0) {
+        seats = await getSeatsForArea(eventDateId, areaId);
+        for (const seat of seats) {
+          await updateSeatInRedis(areaName, seat.id, seat);
+        }
+      }
+
+      const totalSeatsNum = seats.length;
+      const reservedSeatsNum = seats.filter(
+        (seat) => seat.reservedUserId !== null
+      ).length;
+      areaStats.push({
+        areaId: areaId,
+        totalSeatsNum: totalSeatsNum,
+        reservedSeatsNum: reservedSeatsNum,
+      });
+    }
+
+    // 해당 room에 통계 정보 전송
+    io.to(roomName).emit("reservedSeatsStatistic", areaStats);
+  } catch (error) {
+    fastify.log.error(
+      `Error emitting reservedSeatsStatistic: ${error.message}`
+    );
+  }
+}
+
 async function getRoomUserCount(roomName) {
   const maxRetries = 30;
   let delay = null;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const res = await fastify.redis.get(`queue:${roomName}`);
-      return res || 0;
+      // const sockets = await io.in(roomName).fetchSockets(); // 모든 노드에서 룸에 속한 소켓 ID 가져오기
+      const count = await fastify.redis.get(`room:${roomName}:count`);
+      return parseInt(count || "0"); // 소켓 수 반환
     } catch (err) {
       console.error(
         `Timeout reached, retrying (attempt ${attempt}/${maxRetries})...`
@@ -398,6 +548,99 @@ fastify.post("/scheduling/queue/status", async (request, reply) => {
     });
   }
 });
+
+fastify.post(
+  "/scheduling/seat/reservation/statistic",
+  async (request, reply) => {
+    try {
+      await request.jwtVerify();
+      const decodedToken = await request.jwtDecode();
+      const { sub, eventId, eventDateId } = decodedToken;
+
+      if (sub !== "scheduling") {
+        return reply.status(403).send({
+          status: "error",
+          message: "Invalid token subject. Unauthorized request.",
+        });
+      }
+
+      if (!eventId || !eventDateId) {
+        return reply.status(400).send({
+          status: "error",
+          message: "Missing required token payload: eventId or eventDateId.",
+        });
+      }
+
+      const roomName = `${eventId}_${eventDateId}`;
+      const jobName = `seat:reservation:statistic:${roomName}`;
+
+      if (!jobs.has(jobName)) {
+        jobs.add(jobName);
+
+        let isStopped = false;
+
+        CronJob.from({
+          cronTime: DateTime.now().plus({ seconds: 2 }).toJSDate(),
+          onTick: async function () {
+            try {
+              const roomSize = await getRoomUserCount(roomName);
+
+              if (roomSize === 0) {
+                console.log(
+                  `Room is empty. Stopping the cron job for room: ${roomName}`
+                );
+                isStopped = true; // 플래그 설정
+                this.stop();
+              } else {
+                await startReservationStatusInterval(eventId, eventDateId);
+
+                // 다음 실행 시간을 2초 후로 설정
+                const nextExecution = DateTime.now().plus({ seconds: 2 });
+                this.setTime(new CronTime(nextExecution.toJSDate()));
+                this.start(); // 변경 후 작업 재시작 필요
+
+                console.log(
+                  `Task(seat:reservation:statistic) executed at: ${DateTime.now().toISO()}`
+                );
+              }
+            } catch (err) {
+              console.error(err);
+              isStopped = true; // 에러 발생 시에도 작업 중지
+              this.stop();
+            }
+          },
+          onComplete: function () {
+            if (isStopped) {
+              console.log(`Cron job has been stopped: ${jobName}`);
+              jobs.delete(jobName);
+            }
+          },
+          start: true,
+          runOnInit: true,
+          timeZone: "Asia/Seoul",
+        });
+
+        return reply.status(201).send({
+          status: "success",
+          message: "Cron job created successfully.",
+          data: { jobName },
+        });
+      } else {
+        return reply.status(409).send({
+          status: "fail",
+          message: "A cron job is already running for the provided event.",
+        });
+      }
+    } catch (err) {
+      console.error(err);
+      return reply.status(500).send({
+        status: "error",
+        message: "Internal Server Error",
+        error: err.message,
+      });
+    }
+  }
+);
 
 const pubClient = fastify.redis.duplicate();
 const subClient = fastify.redis.duplicate();
